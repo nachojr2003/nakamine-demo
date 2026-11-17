@@ -1,0 +1,661 @@
+<!doctype html>
+<!--
+  CRM de leads — Nakamine Diesel (demo IJV Agency). Un solo archivo, HTML + JS vanilla, sin dependencias externas.
+  Molde: clients/demo-puertasyblindajes/site/panel.html. Marca: rojo #ED252F + negro + blanco (Poppins / Roboto desde ./assets).
+
+  CONTRATO DEL ENDPOINT (GET https://meta.ijvagency.com/webhook/nakamine-demo-panel), sin auth, mismo JSON que Puertas y Blindajes:
+    { ok:true, generado:ISO, leads:[ {
+        lead_id,          // BORRADOR-<session_id> -> CIERRE-<epoch> al pasar a pending (no se usa como clave)
+        session_id,       // CLAVE de las ediciones locales (localStorage) y de la deduplicación
+        nombre, telefono, // telefono = solo dígitos o con +51
+        calificacion,     // opcional: Caliente|Tibio|Frío (si falta, se lee del inicio del resumen)
+        resumen,          // = columna context_summary, en DOS formatos (el parser acepta ambos):
+                          //   draft:   <Caliente|Tibio|Frío>; Repuesto: …; Vehículo: …; Motor: …; Código: …; Preferencia: …; Cliente: …; Ciudad: …; Vendedor: …; <nota>
+                          //   pending: Calificación: <texto> | <último mensaje del usuario>   (el <texto> es el de arriba, con o sin «Calificación:» al inicio)
+        estado,           // draft|pending|verified|rejected (también borrador|alerta_enviada|confirmada|rechazada)
+        programado_para,  // opcional: turno acordado ('AAAA-MM-DD HH:MM' hora Lima, o texto libre)
+        creado            // ISO (created_at)
+    } ] }
+  El parser es TOLERANTE: lo que falte sale como «—»; nunca rompe. Si el endpoint da 404/falla: aviso «sin datos en vivo todavía».
+  Excluye sesiones de prueba (eval_, qa-, ijv-smoke-…) salvo ?incluir_pruebas=1. No se pide ni muestra DNI, correo, cuentas ni token.
+
+  MAPEO estado -> etapa:  draft + Caliente/Tibio -> Ficha completa · draft + Frío -> Perdido/Curioso · draft sin calificación -> Nuevo
+                          pending -> Ficha completa · «Turno por confirmar» · verified -> Ficha completa · «Turno confirmado» · rejected -> Perdido
+  Cotización enviada, Transferencia validada y Entregado/Recogido son posteriores y MANUALES (botones/menú). Se guardan por session_id en localStorage.
+  Seguimientos, canal de origen (FB/TikTok/IG) y la banda de gerencia con ERP/Power BI son MAQUETA/PROPUESTA y se rotulan así.
+  ?vista=atender|pipeline|seguimientos|vendedores|gerencia · ?mock=1 solo ejemplos · ?fake=1 leads falsos en vivo · ?incluir_pruebas=1
+-->
+<html lang="es-PE">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#000000">
+<title>CRM Nakamine Diesel</title>
+<link rel="icon" href="./assets/cropped-nkwp-32x32.png">
+<style>
+@font-face{font-family:'Poppins';font-weight:500;font-display:swap;src:url(./assets/poppins-3a2ac464.woff2) format('woff2')}
+@font-face{font-family:'Poppins';font-weight:600;font-display:swap;src:url(./assets/poppins-95fdc599.woff2) format('woff2')}
+@font-face{font-family:'Poppins';font-weight:700;font-display:swap;src:url(./assets/poppins-e215b6a9.woff2) format('woff2')}
+@font-face{font-family:'Roboto';font-weight:100 900;font-display:swap;src:url(./assets/roboto-fb5169d9.woff2) format('woff2')}
+:root{
+  --red:#ED252F;--red-d:#B81720;--red-50:#FDECEE;--red-100:#FAD3D6;
+  --ink:#111;--txt:#222;--mut:#5b5b5b;--line:#dcdcdc;--line2:#ececec;--bg:#f3f3f3;--card:#fff;
+  --ok:#1E7A46;--ok-50:#E3F3EA;--amb:#B97800;--amb-50:#FFF1CF;--blue:#2C4F73;--blue-50:#E3ECF5;--gray-50:#eee;
+  --f-ui:'Roboto',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;--f-h:'Poppins','Roboto',system-ui,Arial,sans-serif;
+  --r:12px;--sh:0 1px 2px rgba(0,0,0,.08),0 8px 22px -16px rgba(0,0,0,.45);
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--txt);font:14.5px/1.45 var(--f-ui);overflow-x:hidden;-webkit-font-smoothing:antialiased}
+body.lock{overflow:hidden}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+h1,h2,h3,h4{font-family:var(--f-h);margin:0;color:var(--ink);font-weight:600}
+:focus-visible{outline:3px solid var(--red);outline-offset:2px;border-radius:6px}
+.wrap{max-width:1400px;margin:0 auto;padding:0 16px}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+/* cabecera */
+header.top{background:#000;color:#fff}
+header.top .wrap{display:flex;align-items:center;gap:14px;padding-top:10px;padding-bottom:10px;flex-wrap:wrap}
+.logo{background:var(--red);border-radius:8px;padding:6px 12px;display:flex}
+.logo img{height:26px;width:auto;display:block}
+header.top h1{color:#fff;font-size:1.05rem;flex:1;min-width:150px}
+header.top h1 small{display:block;font:400 .74rem var(--f-ui);color:#bbb}
+.live-st{font-size:.78rem;display:flex;align-items:center;gap:6px;color:#ddd}
+.dot{width:9px;height:9px;border-radius:50%;background:#888;display:inline-block}
+.dot.on{background:#3ddc84;box-shadow:0 0 0 3px rgba(61,220,132,.25)}
+.dot.off{background:#f0a020}
+.hbtn{background:transparent;border:1px solid #666;color:#fff;border-radius:8px;padding:6px 12px;font-size:.8rem}
+.hbtn:hover{border-color:#fff}
+.strip{background:var(--red);color:#fff;font-size:.8rem}
+.strip .wrap{padding-top:6px;padding-bottom:6px}
+.strip b{font-weight:700}
+/* pestañas */
+nav.tabs{background:#fff;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:30}
+nav.tabs .wrap{display:flex;gap:2px;overflow-x:auto;scrollbar-width:thin}
+nav.tabs button{background:none;border:0;border-bottom:3px solid transparent;padding:12px 14px;font:600 .88rem var(--f-h);color:var(--mut);white-space:nowrap}
+nav.tabs button .n{display:inline-block;min-width:20px;padding:0 6px;margin-left:6px;border-radius:10px;background:var(--gray-50);font:600 .72rem var(--f-ui);color:var(--txt);text-align:center}
+nav.tabs button[aria-selected=true]{color:var(--red);border-bottom-color:var(--red)}
+nav.tabs button[aria-selected=true] .n{background:var(--red-50);color:var(--red-d)}
+/* banda Tu mes hoy */
+.mes{background:#fff;border-bottom:1px solid var(--line)}
+.mes summary{list-style:none;cursor:pointer;padding:9px 0;display:flex;gap:10px;align-items:center;font:600 .86rem var(--f-h)}
+.mes summary::-webkit-details-marker{display:none}
+.mes summary::after{content:'▾';margin-left:auto;color:var(--mut)}
+.mes[open] summary::after{content:'▴'}
+.mes-g{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;padding-bottom:8px}
+.mes-g div{background:var(--bg);border-radius:10px;padding:8px 10px}
+.mes-g b{display:block;font:700 1.12rem var(--f-h);color:var(--ink)}
+.mes-g span{font-size:.74rem;color:var(--mut)}
+.mes-g .hot{background:var(--red-50)}.mes-g .hot b{color:var(--red-d)}
+.mes p{margin:0 0 10px;font-size:.78rem;color:var(--mut)}
+.mes p code{background:var(--gray-50);padding:1px 6px;border-radius:5px;color:var(--ink);font-family:inherit;font-weight:600}
+/* filtros */
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:14px 0 10px}
+.bar input,.bar select{border:1px solid var(--line);background:#fff;border-radius:9px;padding:8px 10px;min-width:0}
+.bar input{flex:1;min-width:150px}
+.bar .sp{flex:1}
+.btn{border:1px solid var(--line);background:#fff;border-radius:9px;padding:7px 12px;font-weight:500;font-size:.84rem;white-space:nowrap}
+.btn:hover{border-color:#999}
+.btn.pri{background:var(--red);border-color:var(--red);color:#fff}
+.btn.pri:hover{background:var(--red-d)}
+.btn.ok{background:var(--ok);border-color:var(--ok);color:#fff}
+.btn.sm{padding:4px 9px;font-size:.78rem}
+.btn[disabled]{opacity:.45;cursor:default}
+/* chips */
+.chip{display:inline-block;font:600 .7rem var(--f-ui);padding:2px 8px;border-radius:20px;background:var(--gray-50);color:var(--txt);white-space:nowrap}
+.c-cal{background:var(--red);color:#fff}.c-tib{background:var(--amb-50);color:#6b4a00}.c-fri{background:var(--blue-50);color:var(--blue)}.c-na{background:var(--gray-50);color:var(--mut)}
+.c-live{background:var(--ok-50);color:var(--ok)}.c-ex{background:var(--gray-50);color:var(--mut);font-weight:500}
+.c-fb{background:#E7EEFB;color:#1b4aa0}.c-tt{background:#111;color:#fff}.c-ig{background:#F9E3F1;color:#a1155f}.c-wa{background:#DDF4E4;color:#146c36}
+.c-mk{background:var(--amb-50);color:#6b4a00;border:1px dashed #d4a017}
+/* tarjetas ficha */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--sh);padding:12px 14px;min-width:0}
+.card.hot{border-left:5px solid var(--red)}
+.ch{display:flex;gap:8px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
+.ch h3{font-size:1rem}
+.ch .sub{font-size:.76rem;color:var(--mut)}
+.chips{display:flex;gap:4px;flex-wrap:wrap}
+.ft{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;margin:10px 0;padding:10px;background:var(--bg);border-radius:9px}
+.ft div{min-width:0}
+.ft dt{font-size:.68rem;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin:0}
+.ft dd{margin:0;font-weight:500;overflow-wrap:anywhere}
+.ft .w{grid-column:1/-1}
+.ft dd.na{color:#999;font-weight:400}
+.turno{font-size:.8rem;margin:0 0 8px}
+.turno b{color:var(--red-d)}
+.acts{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.acts select{border:1px solid var(--line);border-radius:8px;padding:4px 6px;font-size:.78rem;background:#fff;max-width:100%}
+.empty{padding:26px;text-align:center;color:var(--mut);background:#fff;border:1px dashed var(--line);border-radius:var(--r)}
+h2.sec{font-size:1.02rem;margin:18px 0 8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+h2.sec small{font:400 .78rem var(--f-ui);color:var(--mut)}
+/* pipeline */
+.kan{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(250px,1fr);gap:10px;overflow-x:auto;padding-bottom:10px;align-items:start}
+.col{background:#e8e8e8;border-radius:var(--r);padding:8px;min-width:0}
+.col h3{font-size:.84rem;display:flex;justify-content:space-between;gap:6px;padding:2px 4px 8px;border-bottom:3px solid var(--cc,#999);margin-bottom:8px}
+.col h3 span{font:600 .74rem var(--f-ui);color:var(--mut)}
+.mini{background:#fff;border-radius:9px;padding:8px 10px;margin-bottom:7px;border:1px solid var(--line);cursor:pointer;font-size:.82rem;text-align:left;width:100%;display:block}
+.mini:hover{border-color:var(--red)}
+.mini b{display:block;font-size:.88rem}
+.mini small{color:var(--mut);display:block;overflow-wrap:anywhere}
+/* seguimientos */
+.seg{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(380px,1fr))}
+.tl{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:10px 0}
+.tq{border:1px solid var(--line);border-radius:9px;padding:6px 8px;font-size:.76rem;background:#fff}
+.tq b{display:block;font-size:.82rem}
+.tq.s-env{background:var(--ok-50);border-color:#9bd1b0}
+.tq.s-prog{background:#fff}
+.tq.s-det{background:var(--gray-50);color:#888}
+.msg{background:#DCF8C6;border-radius:4px 12px 12px 12px;padding:8px 11px;font-size:.84rem;white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0}
+.note{background:var(--amb-50);border:1px dashed #d4a017;border-radius:10px;padding:9px 12px;font-size:.82rem;margin:0 0 12px}
+/* vendedores / gerencia */
+.vcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:12px}
+.kpi{background:#fff;border:1px solid var(--line);border-radius:var(--r);padding:10px 12px}
+.kpi b{display:block;font:700 1.35rem var(--f-h);color:var(--ink)}
+.kpi span{font-size:.76rem;color:var(--mut)}
+.row2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin-bottom:12px}
+.bars{display:grid;gap:7px;margin-top:8px}
+.bar-r{display:grid;grid-template-columns:minmax(90px,150px) 1fr auto;gap:8px;align-items:center;font-size:.82rem}
+.bar-r .t{height:16px;background:var(--gray-50);border-radius:8px;overflow:hidden}
+.bar-r .t i{display:block;height:100%;background:var(--red);border-radius:8px;min-width:2px}
+.bar-r .l{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+table.t{width:100%;border-collapse:collapse;font-size:.82rem}
+table.t th,table.t td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line2)}
+table.t th{font-size:.7rem;text-transform:uppercase;color:var(--mut);letter-spacing:.04em}
+.tw{overflow-x:auto}
+/* drawer */
+.ov{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:60;display:none;align-items:flex-start;justify-content:center;overflow-y:auto;padding:24px 12px}
+.ov.on{display:flex}
+.dlg{background:#fff;border-radius:14px;max-width:560px;width:100%;padding:16px;box-shadow:0 30px 70px -20px rgba(0,0,0,.6)}
+.dlg .x{float:right}
+.hist{font-size:.78rem;color:var(--mut);margin:8px 0 0;padding-left:16px}
+textarea.nt{width:100%;border:1px solid var(--line);border-radius:9px;padding:8px;min-height:60px;resize:vertical}
+.toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#111;color:#fff;padding:10px 16px;border-radius:10px;font-size:.84rem;z-index:80;max-width:92vw;display:none}
+.toast.on{display:block}
+footer{padding:20px 0 40px;font-size:.76rem;color:var(--mut)}
+@media(max-width:640px){
+  .grid,.seg{grid-template-columns:1fr}
+  .tl{grid-template-columns:1fr}
+  .kan{grid-auto-columns:82%}
+  .bar-r{grid-template-columns:90px 1fr auto}
+  .ft{grid-template-columns:1fr 1fr}
+}
+</style>
+</head>
+<body>
+<header class="top"><div class="wrap">
+  <div class="logo"><img src="./assets/logo1.png" alt="Nakamine Diesel"></div>
+  <h1>CRM de consultas <small>Demo de IJV Agency · lo que el agente deja listo para tu equipo</small></h1>
+  <div class="live-st" id="liveSt" aria-live="polite"><span class="dot"></span><span>Conectando…</span></div>
+  <button class="hbtn" id="bRefresh" type="button">Actualizar</button>
+  <button class="hbtn" id="bCsv" type="button">Exportar CSV</button>
+  <button class="hbtn" id="bReset" type="button" title="Borra solo lo que editaste en este navegador">Restablecer cambios</button>
+</div></header>
+<div class="strip"><div class="wrap"><b>DEMO.</b> Los registros con la etiqueta <b>EN VIVO</b> vienen del simulador de WhatsApp; los de <b>ejemplo</b> son datos ficticios (nombres y teléfonos inventados). Nada se envía a ningún cliente real.</div></div>
+<nav class="tabs" aria-label="Vistas"><div class="wrap" role="tablist" id="tabs"></div></nav>
+<details class="mes" id="mes"><summary class="wrap">Tu mes hoy <span class="chip c-ex">cifras que nos contó Brian</span></summary>
+ <div class="wrap">
+  <div class="mes-g">
+   <div><b>US$ 900</b><span>pauta al mes (Meta + TikTok)</span></div>
+   <div><b>~50 / día</b><span>consultas nuevas ≈ 1,500 al mes</span></div>
+   <div><b>~40</b><span>ventas por internet el último mes</span></div>
+   <div><b>≈ 2.7 %</b><span>conversión: 40 ÷ ~1,500</span></div>
+   <div class="hot"><b>US$ 22.5</b><span>de pauta por venta: US$ 900 ÷ 40</span></div>
+   <div><b>S/ 800–3,000</b><span>ticket por repuesto · margen 15–20 %</span></div>
+   <div class="hot"><b>+ ~700 extra</b><span>que cobró Meta por las respuestas del bot actual (moneda por confirmar)</span></div>
+  </div>
+  <p>Fórmula: <code>US$ 900 ÷ 40 ventas = US$ 22.5 de pauta por venta</code> · <code>40 ÷ 1,500 consultas ≈ 2.7 %</code>. Son los números de hoy, antes del agente: el punto de partida para medir. <b>No prometemos resultados.</b></p>
+ </div>
+</details>
+<main class="wrap" id="main"></main>
+<footer class="wrap">CRM de demostración construido por IJV Agency. Seguimientos, canales de origen e integración con ERP/Power BI son <b>maqueta / propuesta</b>; las fichas del agente y los estados Ficha completa / Turno por confirmar / Turno confirmado son reales (alimentados por el simulador).</footer>
+<div class="ov" id="ov" role="dialog" aria-modal="true" aria-label="Detalle del lead"><div class="dlg" id="dlg"></div></div>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+(function(){
+'use strict';
+/* ---------- Constantes ---------- */
+var ENDPOINT='https://meta.ijvagency.com/webhook/nakamine-demo-panel';
+var Q=new URLSearchParams(location.search);
+var MOCK=Q.get('mock')==='1',FAKE=Q.get('fake')==='1',PRUEBAS=Q.get('incluir_pruebas')==='1';
+var LS_KEY='nakamine_crm_v1',LS_UI='nakamine_crm_ui';
+var LIMA=-5*3600*1000,D='—';
+var MESES=['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+var DIAS=['dom','lun','mar','mié','jue','vie','sáb'];
+var SLOTS=[[9,30],[11,0],[12,30],[15,0],[16,30]];
+var VISTAS=[{id:'atender',n:'Atender ahora'},{id:'pipeline',n:'Pipeline'},{id:'seguimientos',n:'Seguimientos'},{id:'vendedores',n:'Vendedores'},{id:'gerencia',n:'Gerencia'}];
+var ETAPAS=[
+ {id:'nuevo',n:'Nuevo',c:'#999'},{id:'ficha',n:'Ficha completa',c:'#B97800'},{id:'cotizada',n:'Cotización enviada',c:'#2C4F73'},
+ {id:'transf',n:'Transferencia validada',c:'#ED252F'},{id:'entregado',n:'Entregado / Recogido',c:'#1E7A46'},{id:'perdido',n:'Perdido / Curioso',c:'#bbb'}];
+var EIDX={};ETAPAS.forEach(function(e,i){EIDX[e.id]=i;});
+var VENDS=['Lima','Provincia','Redes'];
+var CANALES=['Facebook','TikTok','Instagram','WhatsApp'];
+var CLIENTES=['Mecánico/Taller','Empresa/Flota','Usuario final'];
+var CAL_CLS={'Caliente':'c-cal','Tibio':'c-tib','Frío':'c-fri','Sin calificar':'c-na'};
+var CAL_RANK={'Caliente':0,'Tibio':1,'Frío':2,'Sin calificar':3};
+var CATALOGO=['294200-0042']; /* códigos publicados que conocemos (hoy el catálogo web no tiene precios) */
+var EJ_SIN_FICHA=22; /* consultas de ejemplo que no llegaron a ficha (curiosos, preguntas sueltas) */
+
+/* ---------- Utilidades ---------- */
+function $(s,r){return (r||document).querySelector(s);}
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function norm(s){return String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');}
+function digits(s){return String(s||'').replace(/\D/g,'');}
+function pad(n){return n<10?'0'+n:''+n;}
+function clean(s){return String(s==null?'':s).replace(/[\u0000-\u001f\u007f]+/g,' ').trim();}
+function lp(ms){var d=new Date(ms+LIMA);return {y:d.getUTCFullYear(),m:d.getUTCMonth(),d:d.getUTCDate(),h:d.getUTCHours(),mi:d.getUTCMinutes(),wd:d.getUTCDay()};}
+function limaMs(y,m,d,h,mi){return Date.UTC(y,m,d,h,mi)-LIMA;}
+function fmtDT(ms){var p=lp(ms);return DIAS[p.wd]+' '+p.d+' '+MESES[p.m]+', '+pad(p.h)+':'+pad(p.mi);}
+function ago(ms){var m=Math.max(1,Math.round((Date.now()-ms)/60000));if(m<60)return 'hace '+m+' min';var h=Math.round(m/60);if(h<48)return 'hace '+h+' h';return 'hace '+Math.round(h/24)+' d';}
+function fmtTel(t){var d=digits(t);if(d.length===11&&d.indexOf('51')===0)d=d.slice(2);if(d.length===9)return d.slice(0,3)+' '+d.slice(3,6)+' '+d.slice(6);return d||'Sin número';}
+function fmtS(n){return 'S/ '+Math.round(n||0).toLocaleString('es-PE');}
+function readLS(k,f){try{var r=localStorage.getItem(k);if(r){var o=JSON.parse(r);if(o&&typeof o==='object')return o;}}catch(e){}return f;}
+function writeLS(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
+function sinSecretos(s){return String(s||'').replace(/\b\d{8,}\b/g,function(m){return m.length>=12?'[dato oculto]':m;});}
+function primerNombre(n){var t=clean(n);if(/^(taller|empresa|mec[aá]nica|transportes|inversiones|servicios|corporaci[oó]n|grupo|distribuidora|repuestos|ferreter[ií]a|constructora|minera|agr[ií]cola)\b/i.test(t)||/\b(s\.?a\.?c\.?|s\.?r\.?l\.?|e\.?i\.?r\.?l\.?)$/i.test(t))return '';return t.split(/\s+/)[0]||'';}
+
+/* ---------- Parser del context_summary (contrato del brief; dos formatos) ---------- */
+var CLAVES={repuesto:'rep',vehiculo:'veh',motor:'mot',codigo:'cod',preferencia:'pref',cliente:'cli',ciudad:'ciu',vendedor:'ven',calificacion:'cal'};
+function parseSummary(txt){
+  var t=String(txt||''),bar=t.indexOf('|'),head=bar>-1?t.slice(0,bar):t,msg=bar>-1?t.slice(bar+1):'';
+  var o={},notas=[];
+  head.split(';').forEach(function(seg){
+    var s=seg.trim();if(!s)return;
+    if(!o.cal&&/^(caliente|tibio|fr[ií]o)\.?$/i.test(s)){o.cal=s;return;}
+    var m=s.match(/^([^:]{2,24}?)\s*:\s*([\s\S]+)$/);
+    var k=m?CLAVES[norm(m[1]).replace(/[^a-z ]/g,'').trim()]:null;
+    if(k){if(k==='cal'){var mm=m[2].match(/caliente|tibio|fr[ií]o/i);o.cal=mm?mm[0]:m[2];}else o[k]=clean(m[2]);}
+    else notas.push(s.replace(/^nota\s*:\s*/i,''));
+  });
+  o.nota=notas.join('. ').trim();o.msg=clean(msg);return o;
+}
+function normCal(c){var n=norm(c);if(n.indexOf('calient')>-1)return 'Caliente';if(n.indexOf('tibi')>-1)return 'Tibio';if(n.indexOf('fri')>-1)return 'Frío';return 'Sin calificar';}
+function vv(v){v=clean(v);return (!v||/^(sin dato|sin codigo|sin código|-|—)$/i.test(v))?D:v.slice(0,70);}
+function nPref(v){var n=norm(v);if(n.indexOf('orig')>-1)return 'Original';if(n.indexOf('altern')>-1)return 'Alternativo';if(n.indexOf('indist')>-1||n.indexOf('recomi')>-1)return 'Indistinto';return D;}
+function nCli(v){var n=norm(v);if(n.indexOf('mecan')>-1||n.indexOf('taller')>-1)return 'Mecánico/Taller';if(n.indexOf('empres')>-1||n.indexOf('flota')>-1)return 'Empresa/Flota';if(n.indexOf('usuario')>-1||n.indexOf('final')>-1||n.indexOf('propio')>-1)return 'Usuario final';return D;}
+function nVen(v){var n=norm(v);if(n.indexOf('lima')>-1)return 'Lima';if(n.indexOf('prov')>-1)return 'Provincia';if(n.indexOf('red')>-1)return 'Redes';return D;}
+function vendedorPor(ciu,cli){var c=norm(ciu);if(!c||c==='—'.normalize('NFD'))return D;if(c.indexOf('lima')===-1&&c!=='')return 'Provincia';return cli==='Usuario final'?'Redes':'Lima';}
+function parseProg(v){
+  var s=clean(v);if(!s)return '';
+  var m=s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+  if(m)return fmtDT(limaMs(+m[1],+m[2]-1,+m[3],+m[4],+m[5]));
+  return s.slice(0,80);
+}
+function normLive(r){
+  if(!r||typeof r!=='object')return null;
+  var sid=clean(r.session_id);
+  if(!PRUEBAS&&/^(ijv-smoke|eval_|ensayo_|qa-|panel-check|smoke-demo|sim-)/i.test(sid))return null;
+  var id=sid||clean(r.lead_id);if(!id)return null;
+  var res=sinSecretos(clean(r.resumen)).slice(0,700),P=parseSummary(res);
+  var cal=normCal(r.calificacion||P.cal);
+  var raw=clean(r.estado).toLowerCase();
+  var est={draft:'draft',borrador:'draft',pending:'pending',alerta_enviada:'pending',verified:'verified',confirmada:'verified',rejected:'rejected',rechazada:'rejected'}[raw]||'draft';
+  var etapa,turnoEst='';
+  if(est==='rejected')etapa='perdido';
+  else if(est==='pending'){etapa='ficha';turnoEst='por confirmar';}
+  else if(est==='verified'){etapa='ficha';turnoEst='confirmado';}
+  else etapa=cal==='Frío'?'perdido':(cal==='Sin calificar'?'nuevo':'ficha');
+  var cr=Date.parse(r.creado);if(isNaN(cr))cr=Date.now();
+  var cli=nCli(P.cli),ciu=vv(P.ciu),cod=vv(P.cod);
+  var ven=nVen(P.ven);if(ven===D)ven=vendedorPor(ciu,cli);
+  return {id:'V-'+id,origen:'en vivo',nombre:clean(r.nombre)||'Sin nombre',tel:digits(r.telefono),cal:cal,
+    rep:vv(P.rep),veh:vv(P.veh),mot:vv(P.mot),cod:cod,pref:nPref(P.pref),cli:cli,ciu:ciu,ven:ven,
+    canal:'WhatsApp',canalNota:'simulador de WhatsApp (demo)',nota:P.nota||'',msg:P.msg,
+    etapa:etapa,turnoEst:turnoEst,turno:parseProg(r.programado_para),creado:cr,monto:0,enCat:CATALOGO.indexOf(cod)>-1,sid:sid};
+}
+/* ---------- Datos de ejemplo (ficticios) ---------- */
+function slotN(k){ /* k-ésimo turno hábil futuro (lun–vie) */
+  var now=Date.now(),p=lp(now),n=-1;
+  for(var d=0;d<14;d++){
+    var ms=limaMs(p.y,p.m,p.d+d,12,0),q=lp(ms);if(q.wd===0||q.wd===6)continue;
+    for(var s=0;s<SLOTS.length;s++){var t=limaMs(q.y,q.m,q.d,SLOTS[s][0],SLOTS[s][1]);if(t>now+30*60000){n++;if(n===k)return fmtDT(t);}}
+  }
+  return '';
+}
+/* [nombre, tel, cal, repuesto, vehículo, motor, código, pref, cliente, ciudad, canal, etapa, horas atrás, monto, nota, enCatálogo, días desde la cotización] */
+var EJ=[
+ ['Taller Ficticio Andes','999 000 001','Caliente','Válvula de succión SCV','Toyota Hilux 2014','1KD','294200-0042','Original','Mecánico/Taller','Lima','Facebook','ficha',2,0,'Necesita para hoy; trae la camioneta',1],
+ ['Juan Ejemplo Pérez','999 000 002','Caliente','Inyector completo','Toyota Hilux 2012','2KD','sin código','Indistinto','Usuario final','Lima','TikTok','ficha',3,0,'Dueño; manda foto de la tarjeta',0],
+ ['Mecánica Ficticia Navara','999 000 003','Caliente','Inyector completo (4)','Nissan Navara D40 2013','YD25','sin código','Original','Mecánico/Taller','Arequipa','Facebook','ficha',5,0,'4 unidades, pide cotización total',0],
+ ['Transportes Ejemplo SAC','999 000 004','Caliente','Bomba de alta presión','Hyundai H100 2016','D4BH','sin código','Alternativo','Empresa/Flota','Lima','WhatsApp','nuevo',1,0,'Flota de 6 unidades',0],
+ ['Rosa Ficticia Quispe','999 000 005','Tibio','Tobera','Kia K2700 2010','J2','sin código','Indistinto','Usuario final','Lima','Instagram','ficha',9,0,'Compara con otro proveedor',1],
+ ['Taller Ejemplo L200','999 000 006','Caliente','Sensor de presión de riel','Mitsubishi L200 2015','4D56','sin código','Original','Mecánico/Taller','Trujillo','TikTok','ficha',4,0,'Quiere enviarlo hoy a Trujillo',1],
+ ['Agrícola Ficticia del Sur','999 000 007','Caliente','Inyectores (6)','Isuzu NPR 2017','4HK1','sin código','Original','Empresa/Flota','Piura','Facebook','cotizada',26,2850,'Cotizó 6; pide fecha de recojo',0,1],
+ ['Pedro Ejemplo Rojas','999 000 008','Tibio','Válvula de control','Isuzu Elf 2011','4JB1','sin código','Alternativo','Mecánico/Taller','Lima','TikTok','cotizada',60,950,'Pidió rebaja por 2 unidades',1,3],
+ ['Mecánica Ficticia JAC','999 000 009','Caliente','Inyector completo','JAC HFC1061 2018','4DA1','sin código','Indistinto','Mecánico/Taller','Cusco','Facebook','cotizada',150,1400,'Cotizado; comparando con Lima',0,6],
+ ['Luis Ejemplo Mendoza','999 000 010','Caliente','Kit de toberas (4)','Foton BJ1043 2014','4DA1','sin código','Alternativo','Usuario final','Lima','Facebook','transf',30,1180,'Transferencia por validar en Telecrédito',0],
+ ['Taller Ejemplo Scorpio','999 000 011','Caliente','Inyector completo','Mahindra Scorpio 2013','mHawk','sin código','Original','Mecánico/Taller','Lima','TikTok','transf',20,1650,'Recoge en tienda mañana',0],
+ ['Constructora Ficticia Hino','999 000 012','Caliente','Inyectores (6)','Hino 500 2015','J08E','sin código','Original','Empresa/Flota','Lima','WhatsApp','entregado',140,2960,'Recogido en Av. Iquitos',0],
+ ['Mecánica Ficticia Amarok','999 000 013','Caliente','Inyector completo','VW Amarok 2012','CDC 2.0','sin código','Original','Mecánico/Taller','Chiclayo','Facebook','entregado',200,2200,'Envío por agencia',0],
+ ['Minera Ejemplo SAC','999 000 014','Caliente','Inyector completo (3)','CAT 320D excavadora','C7','sin código','Original','Empresa/Flota','Arequipa','WhatsApp','entregado',240,3000,'Pedido para mantenimiento de flota',0],
+ ['Carlos Ficticio Tello','999 000 015','Tibio','Válvula reguladora de presión','Toyota Hilux 2008','2KD','sin código','Indistinto','Usuario final','Lima','Instagram','ficha',14,0,'Duda si es la válvula o el inyector',1],
+ ['Taller Ejemplo H1','999 000 016','Caliente','Inyector completo','Hyundai H1 2013','D4CB','sin código','Alternativo','Mecánico/Taller','Lima','TikTok','ficha',6,0,'Quiere probar uno alternativo',0],
+ ['Ana Ejemplo Salas','999 000 017','Frío','Pastillas de freno','Toyota Hilux 2015','—','sin código','—','Usuario final','Lima','Facebook','perdido',48,0,'Busca algo que no vendemos',0],
+ ['Elmer Ficticio Cruz','999 000 018','Frío','—','—','—','sin código','—','Usuario final','Lima','TikTok','perdido',70,0,'Solo preguntó precio, no respondió',0],
+ ['Taller Ejemplo CAT C9','999 000 019','Caliente','Solenoide de inyector','CAT C9 grupo electrógeno','C9','sin código','Original','Mecánico/Taller','Lima','WhatsApp','ficha',7,0,'Máquina parada, urgente',1],
+ ['Mecánica Ficticia D-Max','999 000 020','Tibio','Inyector completo','Chevrolet D-Max 2010','4JK1','sin código','Indistinto','Mecánico/Taller','Huancayo','Facebook','cotizada',100,1250,'Dijo que lo consulta con el cliente',0,4],
+ ['Transp. Ficticios Elf','999 000 021','Caliente','Inyectores (4)','Isuzu NPR 2014','4HK1','sin código','Original','Empresa/Flota','Lima','Facebook','ficha',11,0,'Quiere facturar a la empresa',0],
+ ['Jorge Ejemplo Vargas','999 000 022','Tibio','Sensor de presión de riel','Toyota Hilux 2019','1GD','sin código','Original','Usuario final','Ica','Instagram','ficha',16,0,'Sabe el año, no el motor',0],
+ ['Taller Ejemplo Kia','999 000 023','Caliente','Válvula de succión SCV','Kia Sorento 2011','D4HB','sin código','Alternativo','Mecánico/Taller','Lima','TikTok','cotizada',30,880,'Cotizado ayer',0,1],
+ ['Camila Ficticia Rojas','999 000 024','Frío','Llantas','Hyundai H1 2018','—','sin código','—','Usuario final','Lima','Facebook','perdido',90,0,'Pidió llantas, no es nuestro rubro',0],
+ ['Servicentro Ejemplo Sur','999 000 025','Caliente','Bomba de alta presión','Hino 300 2016','N04C','sin código','Original','Empresa/Flota','Tacna','Facebook','transf',18,2400,'Transferencia por validar',0],
+ ['Taller Ejemplo Mahindra','999 000 026','Tibio','Inyector completo','Mahindra Scorpio 2015','mHawk','sin código','Alternativo','Mecánico/Taller','Lima','TikTok','ficha',20,0,'Pide opciones de marca',0],
+ ['Roberto Ejemplo Silva','999 000 027','Caliente','Inyector completo','Toyota Hilux 2010','1KD','sin código','Indistinto','Usuario final','Lima','Facebook','entregado',300,1560,'Compró 6 días después de la primera respuesta',1],
+ ['Taller Ficticio Foton','999 000 028','Caliente','Tobera','Foton Aumark 2017','ISF2.8','sin código','Original','Mecánico/Taller','Piura','Facebook','ficha',8,0,'Pide envío a Piura',0],
+ ['Flota Ejemplo JAC','999 000 029','Caliente','Inyectores (8)','JAC N-series 2019','ISF2.8','sin código','Original','Empresa/Flota','Lima','WhatsApp','cotizada',50,3000,'Orden de compra en revisión',0,2],
+ ['Marta Ficticia Díaz','999 000 030','Tibio','Válvula de control','Nissan Navara 2016','YD25','sin código','Indistinto','Usuario final','Lima','Instagram','ficha',22,0,'Mecánico le dijo que revise la válvula',0]
+];
+function buildSample(){
+  var k=0;
+  return EJ.map(function(r,i){
+    var lead={id:'E-'+(i+1),origen:'ejemplo',nombre:r[0],tel:digits(r[1]),cal:r[2],rep:r[3]==='—'?D:r[3],veh:r[4]==='—'?D:r[4],mot:r[5]==='—'?D:r[5],
+      cod:vv(r[6]),pref:r[7]==='—'?D:r[7],cli:r[8],ciu:r[9],ven:vendedorPor(r[9],r[8]),canal:r[10],canalNota:'',nota:r[14],msg:'',etapa:r[11],turnoEst:'',turno:'',
+      creado:Date.now()-r[12]*3600000,monto:r[13]||0,enCat:!!r[15],cotDias:r[16]||0,sid:''};
+    if(r[2]==='Caliente'&&(lead.etapa==='ficha'||lead.etapa==='nuevo')&&lead.etapa==='ficha'){lead.turno=slotN(k++);lead.turnoEst=(i%3===0)?'confirmado':'por confirmar';}
+    return lead;
+  });
+}
+function fakeResponse(n){
+  var now=Date.now(),L=[
+   {lead_id:'CIERRE-FAKE-1',session_id:'web_fake1',nombre:'Prueba En Vivo Uno',telefono:'900000901',calificacion:'Caliente',resumen:'Calificación: Caliente; Repuesto: Inyector completo; Vehículo: Toyota Hilux 2016; Motor: 1KD; Código: sin código; Preferencia: Original; Cliente: Mecánico/Taller; Ciudad: Lima; Vendedor: Lima; lo necesita hoy | Quiero un inyector para mi Hilux',estado:'pending',programado_para:'',creado:new Date(now-5*60000).toISOString()},
+   {lead_id:'CIERRE-FAKE-2',session_id:'web_fake2',nombre:'Prueba En Vivo Dos',telefono:'900000902',calificacion:'Tibio',resumen:'Tibio; Repuesto: Tobera; Vehículo: Kia K2700 2010; Motor: sin dato; Código: sin código; Preferencia: Indistinto; Cliente: Usuario final; Ciudad: Cusco; Vendedor: Provincia; compara | ¿Tienen toberas?',estado:'verified',programado_para:'2026-11-18 11:00',creado:new Date(now-2*3600000).toISOString()},
+   {lead_id:'BORRADOR-web_fake3',session_id:'web_fake3',nombre:'Prueba En Vivo Tres',telefono:'900000903',calificacion:'Frío',resumen:'Frío; Repuesto: sin dato; Vehículo: sin dato; solo preguntó precio',estado:'draft',creado:new Date(now-26*3600000).toISOString()}];
+  if(n>=2)L.push({lead_id:'BORRADOR-web_fake4',session_id:'web_fake4',nombre:'Prueba En Vivo Cuatro',telefono:'900000904',resumen:'Caliente; Repuesto: Válvula SCV; Vehículo: Toyota Hilux 2014; Motor: 2KD; Código: 294200-0042; Ciudad: Lima',estado:'draft',creado:new Date(now-60000).toISOString()});
+  return {ok:true,generado:new Date().toISOString(),leads:L};
+}
+/* ---------- Estado ---------- */
+var UI=readLS(LS_UI,{});
+var S={sample:buildSample(),live:[],liveOk:null,liveAt:0,fakeN:0,seen:null,local:readLS(LS_KEY,{}),all:[],byId:{},
+  vista:'atender',f:{q:'',ven:'',canal:'',cli:'',ej:UI.ej!==false}};
+if(MOCK)S.liveOk='mock';
+var VQ=Q.get('vista');S.vista=VISTAS.some(function(v){return v.id===VQ;})?VQ:(VISTAS.some(function(v){return v.id===UI.vista;})?UI.vista:'atender');
+function saveLocal(){writeLS(LS_KEY,S.local);}
+function loc(id){if(!S.local[id])S.local[id]={};return S.local[id];}
+function addEv(id,t){var L=loc(id);if(!L.ev)L.ev=[];L.ev.push({t:Date.now(),x:t});L.ts=Date.now();}
+function buildAll(){
+  var out=[],seen={};
+  S.live.concat(S.f.ej||MOCK?S.sample:[]).forEach(function(b){
+    if(seen[b.id])return;seen[b.id]=1;var L=S.local[b.id]||{},l={};
+    for(var k in b)l[k]=b[k];
+    l.etapa=L.etapa||b.etapa;l.ven=L.ven||b.ven;l.ev=L.ev||[];l.notas=L.notas||'';
+    l.cotAt=L.cotAt||(b.origen==='ejemplo'&&b.etapa==='cotizada'?Date.now()-b.cotDias*86400000-3600000:0);
+    if(l.etapa==='cotizada'&&!l.cotAt)l.cotAt=Date.now();
+    l.respondio=!!L.respondio;l.pausa=!!L.pausa;
+    out.push(l);
+  });
+  S.all=out;S.byId={};out.forEach(function(l){S.byId[l.id]=l;});
+}
+/* ---------- Pull en vivo ---------- */
+function pull(){
+  if(MOCK){render();return Promise.resolve();}
+  var p;
+  if(FAKE)p=new Promise(function(res){setTimeout(function(){res(fakeResponse(++S.fakeN));},120);});
+  else{
+    var ctl=('AbortController' in window)?new AbortController():null,t=setTimeout(function(){if(ctl)ctl.abort();},8000);
+    p=fetch(ENDPOINT+(PRUEBAS?'?incluir_pruebas=1':''),{headers:{'Accept':'application/json'},cache:'no-store',signal:ctl?ctl.signal:undefined})
+      .then(function(r){clearTimeout(t);if(!r.ok)throw new Error('HTTP '+r.status);return r.json();});
+  }
+  return p.then(function(data){
+    if(!data||data.ok!==true||!Array.isArray(data.leads))throw new Error('formato');
+    var list=data.leads.map(function(r){try{return normLive(r);}catch(e){return null;}}).filter(Boolean),ids={};
+    list.forEach(function(l){ids[l.id]=1;});
+    if(S.seen)list.forEach(function(l){if(!S.seen[l.id])toast('Nuevo lead <b>EN VIVO</b>: '+esc(l.nombre)+' ('+esc(l.cal)+')');});
+    S.seen=ids;S.live=list;S.liveOk=true;S.liveAt=Date.now();
+  }).catch(function(){S.liveOk=false;}).then(render);
+}
+/* ---------- Filtros ---------- */
+function filt(rows,opts){
+  opts=opts||{};var q=norm(S.f.q);
+  return rows.filter(function(l){
+    if(S.f.ven&&l.ven!==S.f.ven)return false;
+    if(S.f.canal&&l.canal!==S.f.canal)return false;
+    if(S.f.cli&&l.cli!==S.f.cli)return false;
+    if(q){var h=norm([l.nombre,l.tel,l.rep,l.veh,l.mot,l.cod,l.ciu,l.nota].join(' '));if(h.indexOf(q)===-1)return false;}
+    return true;
+  });
+}
+function byRecent(a,b){return b.creado-a.creado;}
+function turnoTxt(l){return l.turno?(l.turno+(l.turnoEst?' · '+l.turnoEst:'')):(l.turnoEst||'Sin turno elegido');}
+function porAtender(l){return l.cal==='Caliente'&&(l.etapa==='nuevo'||l.etapa==='ficha');}
+/* ---------- Componentes ---------- */
+function chipCal(c){return '<span class="chip '+CAL_CLS[c]+'">'+esc(c)+'</span>';}
+function chipOrigen(l){return l.origen==='en vivo'?'<span class="chip c-live">EN VIVO</span>':'<span class="chip c-ex">ejemplo</span>';}
+function chipCanal(l){var m={Facebook:'c-fb',TikTok:'c-tt',Instagram:'c-ig',WhatsApp:'c-wa'};return '<span class="chip '+(m[l.canal]||'')+'">'+esc(l.canal)+'</span>';}
+function dd(v,w){return '<dd'+((!v||v===D)?' class="na"':'')+'>'+esc(v||D)+'</dd>';}
+function fichaHTML(l,compact){
+  var f=[['Repuesto',l.rep],['Vehículo',l.veh],['Motor',l.mot],['Código',l.cod],['Original / alternativo',l.pref],['Tipo de cliente',l.cli],['Ciudad',l.ciu],['Vendedor asignado',l.ven],['Turno',turnoTxt(l)],['Canal de origen',l.canal+(l.canalNota?' ('+l.canalNota+')':(l.origen==='ejemplo'?' (simulado)':''))]];
+  var h='<dl class="ft">'+f.map(function(x){return '<div><dt>'+x[0]+'</dt>'+dd(x[1])+'</div>';}).join('');
+  var extra=[];if(l.nota)extra.push(l.nota);if(l.msg)extra.push('Escribió: «'+l.msg+'»');
+  h+='<div class="w"><dt>Calificación · notas</dt><dd>'+esc(l.cal)+(extra.length?' · '+esc(extra.join(' · ')):'')+'</dd></div>';
+  if(l.cod!==D&&CATALOGO.indexOf(l.cod)>-1||l.enCat)h+='<div class="w"><dt>Catálogo</dt><dd>Figura en tu catálogo publicado de nakamine.pe</dd></div>';
+  return h+'</dl>';
+}
+function etapaSel(l){return '<select data-act="etapa" data-id="'+esc(l.id)+'" aria-label="Mover etapa">'+ETAPAS.map(function(e){return '<option value="'+e.id+'"'+(e.id===l.etapa?' selected':'')+'>'+esc(e.n)+'</option>';}).join('')+'</select>';}
+function vendSel(l){return '<select data-act="ven" data-id="'+esc(l.id)+'" aria-label="Reasignar vendedor">'+VENDS.map(function(v){return '<option'+(v===l.ven?' selected':'')+'>'+v+'</option>';}).join('')+'</select>';}
+function actsHTML(l){
+  return '<div class="acts"><button class="btn sm pri" data-act="copiar" data-id="'+esc(l.id)+'">Copiar ficha para WhatsApp</button>'
+   +(l.etapa==='nuevo'||l.etapa==='ficha'?'<button class="btn sm ok" data-act="cotizado" data-id="'+esc(l.id)+'">Marcar cotizado</button>':'')
+   +etapaSel(l)+vendSel(l)+'</div>';
+}
+function cardHTML(l){
+  return '<article class="card'+(l.cal==='Caliente'?' hot':'')+'"><div class="ch"><div><h3>'+esc(l.nombre)+'</h3><div class="sub">'+esc(fmtTel(l.tel))+' · '+ago(l.creado)+'</div></div>'
+   +'<div class="chips">'+chipCal(l.cal)+chipOrigen(l)+chipCanal(l)+'<span class="chip">'+esc(ETAPAS[EIDX[l.etapa]].n)+'</span></div></div>'
+   +'<p class="turno" style="margin:8px 0 0">Turno del vendedor: <b>'+esc(turnoTxt(l))+'</b></p>'
+   +fichaHTML(l)+actsHTML(l)+'</article>';
+}
+function empty(t){return '<div class="empty">'+t+'</div>';}
+function barsHTML(items,max,fmt){
+  if(!items.length)return '<p style="color:var(--mut);font-size:.82rem">Sin datos todavía.</p>';
+  max=max||Math.max.apply(null,items.map(function(i){return i[1];}))||1;
+  return '<div class="bars">'+items.map(function(i){return '<div class="bar-r"><span class="l" title="'+esc(i[0])+'">'+esc(i[0])+'</span><span class="t"><i style="width:'+Math.max(2,Math.round(i[1]/max*100))+'%"></i></span><b>'+(fmt?fmt(i[1]):i[1])+'</b></div>';}).join('')+'</div>';
+}
+function filtersBar(){
+  function o(v,t,s){return '<option value="'+esc(v)+'"'+(s?' selected':'')+'>'+esc(t)+'</option>';}
+  return '<div class="bar"><input type="search" id="fq" placeholder="Buscar por nombre, vehículo, motor, código…" value="'+esc(S.f.q)+'" aria-label="Buscar">'
+   +'<select data-f="ven" aria-label="Vendedor">'+o('','Todos los vendedores')+VENDS.map(function(v){return o(v,v,S.f.ven===v);}).join('')+'</select>'
+   +'<select data-f="canal" aria-label="Canal">'+o('','Todos los canales')+CANALES.map(function(v){return o(v,v,S.f.canal===v);}).join('')+'</select>'
+   +'<select data-f="cli" aria-label="Tipo de cliente">'+o('','Todo tipo de cliente')+CLIENTES.map(function(v){return o(v,v,S.f.cli===v);}).join('')+'</select>'
+   +'<label style="font-size:.8rem;display:flex;gap:5px;align-items:center"><input type="checkbox" id="fej"'+(S.f.ej||MOCK?' checked':'')+(MOCK?' disabled':'')+'> mostrar ejemplos</label></div>';
+}
+/* ---------- Vistas ---------- */
+function vAtender(){
+  var rows=filt(S.all).filter(porAtender).sort(byRecent);
+  var tib=filt(S.all).filter(function(l){return l.cal==='Tibio'&&(l.etapa==='nuevo'||l.etapa==='ficha');}).sort(byRecent);
+  var h=filtersBar()+'<h2 class="sec">Calientes por atender <small>'+rows.length+' · con la ficha técnica completa para que el vendedor cotice sin volver a preguntar</small></h2>';
+  h+=rows.length?'<div class="grid">'+rows.map(cardHTML).join('')+'</div>':empty('No hay calientes pendientes con estos filtros.');
+  h+='<h2 class="sec">Tibios para revisar <small>'+tib.length+' · datos parciales o comparando</small></h2>';
+  h+=tib.length?'<div class="grid">'+tib.map(cardHTML).join('')+'</div>':empty('Sin tibios por revisar.');
+  return h;
+}
+function vPipeline(){
+  var rows=filt(S.all),h=filtersBar()+'<div class="kan">';
+  ETAPAS.forEach(function(e){
+    var c=rows.filter(function(l){return l.etapa===e.id;}).sort(byRecent),tot=c.reduce(function(a,l){return a+(l.monto||0);},0);
+    h+='<section class="col" style="--cc:'+e.c+'"><h3>'+esc(e.n)+'<span>'+c.length+(tot?' · '+fmtS(tot):'')+'</span></h3>'
+      +(c.length?c.map(function(l){return '<button class="mini" data-act="abrir" data-id="'+esc(l.id)+'"><b>'+esc(l.nombre)+'</b><small>'+esc(l.rep)+' · '+esc(l.veh)+'</small><small>'+chipCal(l.cal)+' '+chipCanal(l)+' '+esc(l.ven)+(l.origen==='en vivo'?' · EN VIVO':'')+'</small></button>';}).join(''):'<p style="font-size:.78rem;color:var(--mut);margin:4px">Vacío</p>')+'</section>';
+  });
+  return h+'</div>';
+}
+var TQ=[1,3,6];
+function plantilla(l,i){
+  var n=primerNombre(l.nombre),r=(l.rep!==D?l.rep.toLowerCase():'repuesto'),v=(l.veh!==D?' para tu '+l.veh:'');
+  if(i===0)return 'Hola'+(n?' '+n:'')+', soy el asistente virtual de Nakamine Diesel. Ayer el asesor te cotizó el '+r+v+'. ¿Pudiste revisarla? Si tienes alguna duda, dime y se la paso al asesor.';
+  if(i===1)return 'Hola'+(n?' '+n:'')+', ¿sigues buscando el '+r+v+'? Si todavía lo necesitas, el asesor te reconfirma disponibilidad y precio. Av. Iquitos 102, La Victoria (lunes a viernes de 9:00 a 18:00).';
+  return 'Hola'+(n?' '+n:'')+', te escribo por última vez sobre tu cotización del '+r+v+'. La dejo abierta en caso la necesites más adelante. Si prefieres que no te escribamos más, responde NO.';
+}
+function toques(l){
+  var dias=Math.max(0,(Date.now()-l.cotAt)/86400000),res=[],stop=l.respondio||l.pausa;
+  TQ.forEach(function(d,i){
+    var st=stop?'det':(dias>=d?'env':'prog');
+    if(stop&&dias>=d&&!l.respondio&&!l.pausa)st='env';
+    res.push({d:d,i:i,st:st,falta:Math.max(0,d-dias)});
+  });
+  /* si ya hubo toque enviado antes de detener, se muestra enviado */
+  res.forEach(function(t){if(stop&&dias>=t.d)t.st='env';});
+  return res;
+}
+function vSeguimientos(){
+  var rows=filt(S.all).filter(function(l){return l.etapa==='cotizada';}).sort(function(a,b){return a.cotAt-b.cotAt;});
+  var h='<div class="note"><span class="chip c-mk">MAQUETA</span> <b>Así delegarías los seguimientos.</b> Hoy el vendedor se acuerda de escribir; aquí el sistema lo hace por él: <b>día 1 · día 3 · día 6</b> después de la cotización y luego se detiene (máximo 3 toques, para no saturar al cliente ni dañar el número de WhatsApp). Si el cliente responde, el seguimiento se corta y el caso vuelve al vendedor. Los mensajes son una vista previa: en esta demo no se envía nada.</div>'+filtersBar();
+  h+='<h2 class="sec">Cotizaciones sin respuesta <small>'+rows.length+'</small></h2>';
+  if(!rows.length)return h+empty('No hay cotizaciones abiertas. Marca un lead como «cotizado» y aparecerá aquí.');
+  h+='<div class="seg">'+rows.map(function(l){
+    var T=toques(l),sig=null;T.forEach(function(t){if(!sig&&t.st==='prog')sig=t;});
+    var fin=T.every(function(t){return t.st==='env';});
+    var show=sig?sig.i:2,dias=Math.floor((Date.now()-l.cotAt)/86400000);
+    return '<article class="card"><div class="ch"><div><h3>'+esc(l.nombre)+'</h3><div class="sub">'+esc(l.rep)+' · '+esc(l.veh)+(l.monto?' · '+fmtS(l.monto):'')+'</div></div><div class="chips">'+chipOrigen(l)+chipCanal(l)+'<span class="chip">'+esc(l.ven)+'</span></div></div>'
+     +'<p class="sub" style="margin:8px 0 0">Cotizado '+(dias<1?'hoy':'hace '+dias+' d')+(l.respondio?' · <b>el cliente respondió: seguimiento detenido</b>':l.pausa?' · <b>seguimiento pausado</b>':'')+'</p>'
+     +'<div class="tl">'+T.map(function(t){var cls=t.st==='env'?'s-env':t.st==='det'?'s-det':'s-prog';
+        var txt=t.st==='env'?'Enviado (maqueta)':t.st==='det'?'Detenido':(t.falta<1?'Sale hoy':'Sale en '+Math.ceil(t.falta)+' d');
+        return '<div class="tq '+cls+'"><b>Toque '+(t.i+1)+' · día '+t.d+'</b>'+txt+'</div>';}).join('')+'</div>'
+     +(fin&&!l.respondio?'<p class="sub"><b>Seguimiento terminado</b> (3 de 3): se detiene y la ficha queda para el vendedor.</p>':'')
+     +'<div class="sub">Vista previa · toque '+(show+1)+':</div><div class="msg">'+esc(plantilla(l,show))+'</div>'
+     +'<div class="acts"><button class="btn sm" data-act="copiarmsg" data-id="'+esc(l.id)+'" data-i="'+show+'">Copiar mensaje</button>'
+     +'<button class="btn sm ok" data-act="respondio" data-id="'+esc(l.id)+'">Cliente respondió</button>'
+     +'<button class="btn sm" data-act="pausa" data-id="'+esc(l.id)+'">'+(l.pausa?'Reanudar':'Pausar')+'</button>'
+     +'<button class="btn sm" data-act="abrir" data-id="'+esc(l.id)+'">Ver ficha</button></div></article>';
+  }).join('')+'</div>';
+  return h;
+}
+function stats(rows){
+  var cot=rows.filter(function(l){return EIDX[l.etapa]>=2&&l.etapa!=='perdido';}),ven=rows.filter(function(l){return l.etapa==='transf'||l.etapa==='entregado';});
+  return {n:rows.length,fichas:rows.filter(function(l){return l.etapa!=='nuevo'&&l.etapa!=='perdido';}).length,cot:cot.length,ven:ven.length,ent:rows.filter(function(l){return l.etapa==='entregado';}).length,
+    monto:ven.reduce(function(a,l){return a+(l.monto||0);},0),ab:rows.filter(function(l){return l.etapa==='nuevo'||l.etapa==='ficha'||l.etapa==='cotizada';}).length};
+}
+function vVendedores(){
+  var rows=filt(S.all),h=filtersBar()+'<div class="note"><span class="chip c-mk">PROPUESTA</span> La asignación sigue la regla: ciudad fuera de Lima → <b>Provincia</b>; Lima + mecánico/taller o empresa → <b>Lima</b>; Lima + usuario final → <b>Redes</b>. Puedes reasignar a mano en cada ficha.</div><div class="vcards">';
+  VENDS.forEach(function(v){
+    var r=rows.filter(function(l){return l.ven===v;}),s=stats(r),cal=r.filter(porAtender).length;
+    var por=r.filter(porAtender).sort(byRecent).slice(0,4);
+    h+='<section class="card"><div class="ch"><h3>Vendedor '+v+'</h3><span class="chip">'+s.n+' leads</span></div>'
+     +'<div class="kpis" style="margin:10px 0">'
+     +'<div class="kpi"><b>'+cal+'</b><span>calientes por atender</span></div><div class="kpi"><b>'+s.ab+'</b><span>casos abiertos</span></div>'
+     +'<div class="kpi"><b>'+s.fichas+'</b><span>fichas completas</span></div><div class="kpi"><b>'+s.cot+'</b><span>cotizadas</span></div>'
+     +'<div class="kpi"><b>'+s.ven+'</b><span>cerradas</span></div><div class="kpi"><b>'+(s.ven?fmtS(s.monto/s.ven):D)+'</b><span>ticket promedio</span></div></div>'
+     +'<h4 style="font-size:.84rem;margin:4px 0 6px">Siguientes en su cola</h4>'
+     +(por.length?por.map(function(l){return '<button class="mini" data-act="abrir" data-id="'+esc(l.id)+'"><b>'+esc(l.nombre)+'</b><small>'+esc(l.rep)+' · '+esc(l.veh)+'</small><small>'+esc(turnoTxt(l))+'</small></button>';}).join(''):'<p style="font-size:.8rem;color:var(--mut)">Cola vacía.</p>')+'</section>';
+  });
+  return h+'</div>';
+}
+function topList(rows,key,n,skip){
+  var m={};rows.forEach(function(l){var k=l[key];if(!k||k===D||(skip&&skip.test(k)))return;m[k]=(m[k]||0)+1;});
+  return Object.keys(m).map(function(k){return [k,m[k]];}).sort(function(a,b){return b[1]-a[1];}).slice(0,n);
+}
+function marcaVeh(v){return String(v).replace(/\s+\d{4}.*$/,'').replace(/\s+(excavadora|grupo electrógeno)$/i,'');}
+function vGerencia(){
+  var rows=filt(S.all),s=stats(rows),cons=s.n+(S.f.ej||MOCK?EJ_SIN_FICHA:0)*(S.f.ven||S.f.canal||S.f.cli||S.f.q?0:1);
+  var conv=cons?(s.ven/cons*100):0,tick=s.ven?s.monto/s.ven:0;
+  var h=filtersBar()+'<div class="note"><span class="chip c-mk">PROPUESTA</span> <b>Se conecta con tu ERP y tu Power BI.</b> Hoy este panel se alimenta de lo que el agente captura; el siguiente paso es cruzarlo con tus ventas reales, stock y zonas para que los números de gerencia salgan solos. No está construido: lo definimos contigo. Las cifras de abajo mezclan datos EN VIVO y <b>ejemplos ficticios</b>; el origen (Facebook / TikTok / Instagram) también es simulado hasta conectar los canales.</div>';
+  h+='<div class="kpis"><div class="kpi"><b>'+cons+'</b><span>consultas</span></div><div class="kpi"><b>'+s.fichas+'</b><span>fichas completas</span></div><div class="kpi"><b>'+s.cot+'</b><span>cotizadas</span></div>'
+    +'<div class="kpi"><b>'+s.ven+'</b><span>transferencia validada o entregadas</span></div><div class="kpi"><b>'+conv.toFixed(1)+' %</b><span>conversión (cerradas ÷ consultas)</span></div>'
+    +'<div class="kpi"><b>'+(tick?fmtS(tick):D)+'</b><span>ticket promedio</span></div>'
+    +'<div class="kpi"><b>'+(s.monto?fmtS(s.monto*.15)+' – '+fmtS(s.monto*.20):D)+'</b><span>margen estimado (15–20 % de '+fmtS(s.monto)+')</span></div></div>';
+  var fun=[['Consultas',cons],['Fichas completas',s.fichas],['Cotizadas',s.cot],['Transferencia validada o más',s.ven],['Entregadas / recogidas',s.ent]];
+  h+='<div class="row2"><section class="card"><h3>Embudo</h3>'+barsHTML(fun,cons||1)+'</section>';
+  var canal=CANALES.map(function(c){var r=rows.filter(function(l){return l.canal===c;}),x=stats(r);return [c,r.length,x.ven,x.monto];});
+  h+='<section class="card"><h3>Por canal de origen <span class="chip c-mk">simulado</span></h3><div class="tw"><table class="t"><tr><th>Canal</th><th>Leads</th><th>Cerradas</th><th>Venta</th></tr>'
+    +canal.map(function(c){return '<tr><td>'+c[0]+'</td><td>'+c[1]+'</td><td>'+c[2]+'</td><td>'+(c[3]?fmtS(c[3]):D)+'</td></tr>';}).join('')+'</table></div></section></div>';
+  var cli=CLIENTES.map(function(c){var r=rows.filter(function(l){return l.cli===c;});return [c,r.length,stats(r).ven];});
+  var totCli=cli.reduce(function(a,c){return a+c[1];},0)||1;
+  h+='<div class="row2"><section class="card"><h3>Por tipo de cliente</h3><p style="font-size:.78rem;color:var(--mut);margin:4px 0 0">Referencia que nos diste: 85 % mecánicos, 15 % dueños del vehículo.</p>'
+    +barsHTML(cli.map(function(c){return [c[0]+' · '+Math.round(c[1]/totCli*100)+' %',c[1]];}))+'</section>';
+  h+='<section class="card"><h3>Por vendedor</h3><div class="tw"><table class="t"><tr><th>Vendedor</th><th>Leads</th><th>Cotizadas</th><th>Cerradas</th><th>Venta</th></tr>'
+    +VENDS.map(function(v){var x=stats(rows.filter(function(l){return l.ven===v;}));return '<tr><td>'+v+'</td><td>'+x.n+'</td><td>'+x.cot+'</td><td>'+x.ven+'</td><td>'+(x.monto?fmtS(x.monto):D)+'</td></tr>';}).join('')+'</table></div></section></div>';
+  /* Lo que más te piden */
+  var real=rows.filter(function(l){return l.etapa!=='perdido'||l.rep!==D;});
+  var fuera={};real.forEach(function(l){if(l.rep===D||l.enCat||CATALOGO.indexOf(l.cod)>-1)return;var k=l.rep+' · '+marcaVeh(l.veh);fuera[k]=(fuera[k]||0)+1;});
+  var fl=Object.keys(fuera).map(function(k){return [k,fuera[k]];}).sort(function(a,b){return b[1]-a[1];}).slice(0,8);
+  h+='<h2 class="sec">Lo que más te piden <small>insumo para compras e importaciones</small></h2><div class="row2">'
+    +'<section class="card"><h3>Vehículos</h3>'+barsHTML(topList(real.map(function(l){return {v:marcaVeh(l.veh)};}),'v',8))+'</section>'
+    +'<section class="card"><h3>Motores</h3>'+barsHTML(topList(real,'mot',8,/^sin/i))+'</section>'
+    +'<section class="card"><h3>Repuestos</h3>'+barsHTML(topList(real,'rep',8))+'</section>'
+    +'<section class="card"><h3>Códigos pedidos</h3>'+barsHTML(topList(real,'cod',6))+'<p style="font-size:.76rem;color:var(--mut)">Pocos clientes saben el código: por eso el agente pide vehículo y motor.</p></section></div>';
+  h+='<section class="card"><h3>Pedidos que no están en tu catálogo publicado</h3><p style="font-size:.78rem;color:var(--mut);margin:4px 0 0">Repuesto + vehículo pedidos sin coincidencia con un producto de nakamine.pe (el catálogo web tiene 33 productos). Si se repiten, son candidatos a la próxima importación.</p>'+barsHTML(fl)+'</section>';
+  return h;
+}
+/* ---------- Render ---------- */
+function render(){
+  buildAll();
+  var st=$('#liveSt'),vivos=S.live.length;
+  st.innerHTML=S.liveOk===true?'<span class="dot on"></span><span>En vivo · '+vivos+' lead'+(vivos===1?'':'s')+(vivos?'':' (aún sin consultas reales)')+'</span>':S.liveOk==='mock'?'<span class="dot"></span><span>Modo ejemplos (?mock=1)</span>':S.liveOk===false?'<span class="dot off"></span><span>Sin datos en vivo todavía</span>':'<span class="dot"></span><span>Conectando…</span>';
+  var tabs=VISTAS.map(function(v){
+    var n=v.id==='atender'?S.all.filter(porAtender).length:v.id==='seguimientos'?S.all.filter(function(l){return l.etapa==='cotizada';}).length:'';
+    return '<button role="tab" type="button" aria-selected="'+(S.vista===v.id)+'" data-vista="'+v.id+'">'+v.n+(n!==''?'<span class="n">'+n+'</span>':'')+'</button>';}).join('');
+  $('#tabs').innerHTML=tabs;
+  var aviso=S.liveOk===false?'<div class="note">Sin datos en vivo todavía: el panel en vivo se está conectando. Mientras tanto ves los ejemplos ficticios.</div>':'';
+  var fnv={atender:vAtender,pipeline:vPipeline,seguimientos:vSeguimientos,vendedores:vVendedores,gerencia:vGerencia}[S.vista];
+  var m=$('#main'),act=document.activeElement,keep=act&&act.id==='fq';
+  m.innerHTML='<div style="height:6px"></div>'+aviso+fnv();
+  if(keep){var q=$('#fq');if(q){q.focus();q.setSelectionRange(q.value.length,q.value.length);}}
+  if(S.open&&S.byId[S.open])drawer(S.open);
+}
+/* ---------- Acciones ---------- */
+function toast(html,ms){var t=$('#toast');t.innerHTML=html;t.className='toast on';clearTimeout(toast.t);toast.t=setTimeout(function(){t.className='toast';},ms||3200);}
+function fichaTexto(l){
+  return ['*Ficha Nakamine Diesel*','Cliente: '+l.nombre+(l.tel?' ('+fmtTel(l.tel)+')':''),'Repuesto: '+l.rep,'Vehículo: '+l.veh,'Motor: '+l.mot,'Código: '+l.cod,'Original/alternativo: '+l.pref,'Tipo de cliente: '+l.cli,'Ciudad: '+l.ciu,'Vendedor: '+l.ven,'Turno: '+turnoTxt(l),'Calificación: '+l.cal+(l.nota?' · '+l.nota:'')].join('\n');
+}
+function copiar(txt,ok){
+  function fb(){var a=document.createElement('textarea');a.value=txt;a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.select();try{document.execCommand('copy');toast(ok);}catch(e){toast('No se pudo copiar');}document.body.removeChild(a);}
+  if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(txt).then(function(){toast(ok);},fb);else fb();
+}
+function mover(id,etapa,quiet){
+  var l=S.byId[id];if(!l||l.etapa===etapa)return;
+  var L=loc(id);L.etapa=etapa;if(etapa==='cotizada'&&!L.cotAt)L.cotAt=Date.now();
+  addEv(id,'Etapa: '+ETAPAS[EIDX[etapa]].n);saveLocal();render();if(!quiet)toast('Movido a <b>'+esc(ETAPAS[EIDX[etapa]].n)+'</b>');
+}
+document.addEventListener('click',function(e){
+  var t=e.target.closest('[data-act],[data-vista],#bRefresh,#bCsv,#bReset,.ov');if(!t)return;
+  if(t.id==='ov'&&e.target===t){closeD();return;}
+  if(t.dataset.vista){S.vista=t.dataset.vista;UI.vista=S.vista;writeLS(LS_UI,UI);try{var u=new URL(location.href);u.searchParams.set('vista',S.vista);history.replaceState(null,'',u);}catch(x){}render();window.scrollTo(0,0);return;}
+  if(t.id==='bRefresh'){toast('Actualizando…',900);pull();return;}
+  if(t.id==='bCsv'){csv();return;}
+  if(t.id==='bReset'){if(confirm('¿Borrar los cambios que hiciste en este navegador (etapas, vendedores, notas)?')){S.local={};try{localStorage.removeItem(LS_KEY);}catch(x){}render();toast('Cambios restablecidos');}return;}
+  var a=t.dataset.act,id=t.dataset.id,l=S.byId[id];
+  if(a==='abrir'){drawer(id);return;}
+  if(a==='cerrar'){closeD();return;}
+  if(!l)return;
+  if(a==='copiar'){copiar(fichaTexto(l),'Ficha copiada. Pégala en WhatsApp.');addEv(id,'Ficha copiada');saveLocal();}
+  else if(a==='cotizado'){mover(id,'cotizada');}
+  else if(a==='copiarmsg'){copiar(plantilla(l,+t.dataset.i),'Mensaje copiado');}
+  else if(a==='respondio'){var L=loc(id);L.respondio=true;addEv(id,'El cliente respondió: seguimiento detenido');saveLocal();render();toast('Seguimiento detenido');}
+  else if(a==='pausa'){var P=loc(id);P.pausa=!P.pausa;saveLocal();render();}
+  else if(a==='nota'){var N=loc(id);N.notas=(document.getElementById('nt')||{}).value||'';addEv(id,'Nota guardada');saveLocal();toast('Nota guardada');}
+});
+document.addEventListener('change',function(e){
+  var t=e.target;
+  if(t.dataset.act==='etapa')mover(t.dataset.id,t.value);
+  else if(t.dataset.act==='ven'){var L=loc(t.dataset.id);L.ven=t.value;addEv(t.dataset.id,'Reasignado a '+t.value);saveLocal();render();toast('Reasignado a <b>'+esc(t.value)+'</b>');}
+  else if(t.dataset.f){S.f[t.dataset.f]=t.value;render();}
+  else if(t.id==='fej'){S.f.ej=t.checked;UI.ej=t.checked;writeLS(LS_UI,UI);render();}
+});
+document.addEventListener('input',function(e){if(e.target.id==='fq'){S.f.q=e.target.value;render();}});
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeD();});
+function drawer(id){
+  var l=S.byId[id];if(!l)return;S.open=id;
+  var ev=(l.ev||[]).slice().reverse().slice(0,6);
+  $('#dlg').innerHTML='<button class="btn sm x" data-act="cerrar" type="button">Cerrar</button><div class="ch"><div><h3>'+esc(l.nombre)+'</h3><div class="sub">'+esc(fmtTel(l.tel))+' · '+ago(l.creado)+'</div></div></div>'
+   +'<div class="chips" style="margin:8px 0">'+chipCal(l.cal)+chipOrigen(l)+chipCanal(l)+'<span class="chip">'+esc(ETAPAS[EIDX[l.etapa]].n)+'</span></div>'
+   +fichaHTML(l)+actsHTML(l)
+   +'<h4 style="margin:12px 0 4px;font-size:.84rem">Notas del vendedor</h4><textarea class="nt" id="nt" placeholder="Precio cotizado, acuerdos, recojo…">'+esc(l.notas)+'</textarea><div class="acts" style="margin-top:6px"><button class="btn sm" data-act="nota" data-id="'+esc(id)+'">Guardar nota</button></div>'
+   +(ev.length?'<ul class="hist">'+ev.map(function(x){return '<li>'+esc(fmtDT(x.t))+' · '+esc(x.x)+'</li>';}).join('')+'</ul>':'');
+  $('#ov').classList.add('on');document.body.classList.add('lock');
+}
+function closeD(){S.open=null;$('#ov').classList.remove('on');document.body.classList.remove('lock');}
+function csvCell(v){v=String(v==null?'':v);if(/^[=+\-@]/.test(v))v="'"+v;return '"'+v.replace(/"/g,'""')+'"';}
+function csv(){
+  var cols=['Origen','Nombre','Teléfono','Calificación','Etapa','Repuesto','Vehículo','Motor','Código','Original/alternativo','Tipo de cliente','Ciudad','Vendedor','Canal','Turno','Monto S/','Nota'];
+  var rows=filt(S.all).map(function(l){return [l.origen,l.nombre,l.tel,l.cal,ETAPAS[EIDX[l.etapa]].n,l.rep,l.veh,l.mot,l.cod,l.pref,l.cli,l.ciu,l.ven,l.canal,turnoTxt(l),l.monto||'',l.nota].map(csvCell).join(',');});
+  var blob=new Blob(['﻿'+cols.map(csvCell).join(',')+'\n'+rows.join('\n')],{type:'text/csv;charset=utf-8'});
+  var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='nakamine-leads.csv';document.body.appendChild(a);a.click();document.body.removeChild(a);
+  toast('CSV exportado ('+rows.length+' filas)');
+}
+render();pull();
+if(!MOCK)setInterval(pull,20000);
+})();
+</script>
+</body>
+</html>
